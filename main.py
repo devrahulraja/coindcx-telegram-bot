@@ -7,11 +7,13 @@ from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
+    ApplicationBuilder,
     CommandHandler,
     CallbackQueryHandler,
     MessageHandler,
     filters,
     ContextTypes,
+    JobQueue,
 )
 from threading import Thread
 
@@ -301,7 +303,8 @@ def main():
         logger.error("TELEGRAM_BOT_TOKEN not set")
         return
 
-    application = Application.builder().token(token).build()
+    # Initialize application with job queue
+    application = ApplicationBuilder().token(token).build()
 
     # Add handlers
     application.add_handler(CommandHandler("start", start))
