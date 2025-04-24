@@ -1,119 +1,81 @@
-import json, os, requests
-from apscheduler.schedulers.background import BackgroundScheduler
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackContext, filters, CallbackQueryHandler
+from flask import Flask
+from threading import Thread
+import time
+import requests
+from telegram import Bot, Update
+from telegram.ext import CommandHandler, Updater, CallbackContext
 
-TOKEN = os.getenv("BOT_TOKEN")
-DATA_FILE = "alerts.json"
+TELEGRAM_TOKEN = 'YOUR_BOT_TOKEN'  # Replace with your real bot token
+bot = Bot(token=TELEGRAM_TOKEN)
+updater = Updater(token=TELEGRAM_TOKEN)
+dispatcher = updater.dispatcher
 
-if not os.path.exists(DATA_FILE):
-    with open(DATA_FILE, "w") as f:
-        json.dump({}, f)
+alerts = []  # [{chat_id, symbol, condition, target}]
 
-def load_alerts():
-    with open(DATA_FILE) as f:
-        return json.load(f)
+def start(update: Update, context: CallbackContext):
+    update.message.reply_text("👋 Welcome to CoinDCX INR Alert Bot!\n\nCommands:\n/set SYMBOL >=|<= PRICE\n/price SYMBOLINR\nExample: /set VIBINR >= 2")
 
-def save_alerts(data):
-    with open(DATA_FILE, "w") as f:
-        json.dump(data, f, indent=2)
-
-def get_live_price(symbol):
+def set_alert(update: Update, context: CallbackContext):
     try:
-        data = requests.get("https://api.coindcx.com/exchange/ticker").json()
-        for entry in data:
-            if entry["market"] == symbol:
-                return float(entry["last_price"])
-    except Exception:
-        return None
+        symbol = context.args[0].upper()
+        cond = context.args[1]
+        price = float(context.args[2])
+        if cond not in ['>=', '<=']:
+            update.message.reply_text("❌ Invalid operator. Use >= or <=")
+            return
+        alerts.append({
+            "chat_id": update.message.chat_id,
+            "symbol": symbol,
+            "condition": cond,
+            "target": price
+        })
+        update.message.reply_text(f"✅ Alert set: {symbol} {cond} ₹{price}")
+    except Exception as e:
+        update.message.reply_text("❌ Usage: /set SYMBOL >=|<= PRICE\nExample: /set VIBINR >= 2")
 
-async def start(update: Update, context: CallbackContext):
-    keyboard = [
-        [InlineKeyboardButton("📈 Track a Coin", callback_data="track")],
-        [InlineKeyboardButton("📋 My Alerts", callback_data="alerts")]
-    ]
-    await update.message.reply_text("Welcome to CoinDCX INR Alert Bot!", reply_markup=InlineKeyboardMarkup(keyboard))
-
-async def button_handler(update: Update, context: CallbackContext):
-    query = update.callback_query
-    await query.answer()
-    if query.data == "track":
-        await query.message.reply_text("Send coin symbol (e.g., BTCINR):")
-        context.user_data["step"] = "awaiting_coin"
-    elif query.data == "alerts":
-        alerts = load_alerts().get(str(query.from_user.id), [])
-        if alerts:
-            text = "\n".join([f'{a["coin"]} {a["condition"]} {a["target"]}' for a in alerts])
+def get_price(update: Update, context: CallbackContext):
+    try:
+        symbol = context.args[0].upper()
+        res = requests.get("https://public.coindcx.com/market_data/ticker").json()
+        data = next((x for x in res if x["market"] == symbol), None)
+        if data:
+            update.message.reply_text(f"📊 {symbol} price: ₹{data['last_price']}")
         else:
-            text = "No alerts set."
-        await query.message.reply_text(text)
+            update.message.reply_text(f"❌ Symbol {symbol} not found.")
+    except Exception as e:
+        update.message.reply_text("❌ Usage: /price SYMBOLINR\nExample: /price VIBINR")
 
-async def handle_text(update: Update, context: CallbackContext):
-    user_id = str(update.message.from_user.id)
-    text = update.message.text.strip().upper()
-    step = context.user_data.get("step")
-
-    if step == "awaiting_coin":
-        context.user_data["coin"] = text
-        context.user_data["step"] = "awaiting_condition"
-        keyboard = [
-            [InlineKeyboardButton(">= (Above)", callback_data=">=")],
-            [InlineKeyboardButton("<= (Below)", callback_data="<=")]
-        ]
-        await update.message.reply_text(f"Selected {text}. Choose condition:", reply_markup=InlineKeyboardMarkup(keyboard))
-
-    elif step == "awaiting_target":
+def check_alerts():
+    while True:
         try:
-            target = float(text)
-            alert = {
-                "coin": context.user_data["coin"],
-                "condition": context.user_data["condition"],
-                "target": target
-            }
-            data = load_alerts()
-            data.setdefault(user_id, []).append(alert)
-            save_alerts(data)
-            await update.message.reply_text("✅ Alert saved.")
-        except ValueError:
-            await update.message.reply_text("❌ Invalid number. Try again.")
-        context.user_data.clear()
+            res = requests.get("https://public.coindcx.com/market_data/ticker").json()
+            for alert in alerts:
+                data = next((x for x in res if x["market"] == alert["symbol"]), None)
+                if not data:
+                    continue
+                price = float(data["last_price"])
+                if alert["condition"] == "<=" and price <= alert["target"]:
+                    bot.send_message(chat_id=alert["chat_id"], text=f"📉 {alert['symbol']} = ₹{price} (<= ₹{alert['target']})")
+                    alerts.remove(alert)
+                elif alert["condition"] == ">=" and price >= alert["target"]:
+                    bot.send_message(chat_id=alert["chat_id"], text=f"📈 {alert['symbol']} = ₹{price} (>= ₹{alert['target']})")
+                    alerts.remove(alert)
+        except Exception as e:
+            print("Error in alert check:", e)
+        time.sleep(30)
 
-async def condition_choice(update: Update, context: CallbackContext):
-    query = update.callback_query
-    await query.answer()
-    context.user_data["condition"] = query.data
-    context.user_data["step"] = "awaiting_target"
-    await query.message.reply_text("Enter your target price:")
+# Flask app to keep Render alive
+app = Flask(__name__)
+@app.route('/')
+def home():
+    return "✅ Bot is running!", 200
 
-def check_alerts(app):
-    data = load_alerts()
-    for user_id, alerts in data.items():
-        to_notify = []
-        for alert in alerts:
-            price = get_live_price(alert["coin"])
-            if price is None:
-                continue
-            if alert["condition"] == ">=" and price >= alert["target"]:
-                to_notify.append((alert, price))
-            elif alert["condition"] == "<=" and price <= alert["target"]:
-                to_notify.append((alert, price))
-        for alert, price in to_notify:
-            app.bot.send_message(chat_id=user_id,
-                text=f"🔔 {alert['coin']} is now {price:.2f} (matched {alert['condition']} {alert['target']})")
+def run_bot():
+    dispatcher.add_handler(CommandHandler("start", start))
+    dispatcher.add_handler(CommandHandler("set", set_alert))
+    dispatcher.add_handler(CommandHandler("price", get_price))
+    updater.start_polling()
+    check_alerts()  # Keeps checking in this thread
 
-def run():
-    app = ApplicationBuilder().token(TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(button_handler, pattern="^(track|alerts)$"))
-    app.add_handler(CallbackQueryHandler(condition_choice, pattern="^(>=|<=)$"))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-
-    scheduler = BackgroundScheduler()
-    scheduler.add_job(lambda: check_alerts(app), 'interval', seconds=30)
-    scheduler.start()
-
-    print("Bot is running...")
-    app.run_polling()
-
-if __name__ == "__main__":
-    run()
+# Start everything
+Thread(target=run_bot).start()
