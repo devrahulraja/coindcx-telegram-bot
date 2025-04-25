@@ -340,15 +340,18 @@ def main():
         # Initialize application
         application = ApplicationBuilder().token(token).build()
 
+        # Verify job queue
+        if application.job_queue is None:
+            logger.error("Job queue not initialized. Ensure python-telegram-bot[job-queue] is installed")
+            raise RuntimeError("Job queue not initialized")
+        logger.info("Job queue successfully initialized")
+
         # Add handlers
         application.add_handler(CommandHandler("start", start))
         application.add_handler(CallbackQueryHandler(button))
         application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
         # Schedule alert checks
-        if application.job_queue is None:
-            logger.error("Job queue not initialized")
-            raise RuntimeError("Job queue not initialized")
         application.job_queue.run_repeating(check_alerts, interval=60, first=10)
         logger.info("Alert checking scheduled every 60 seconds")
 
